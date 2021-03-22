@@ -20,6 +20,7 @@ const BOT_NAME: &str = "AOSC 第二包通委";
 const LIST_MAX_SIZE: usize = 30;
 // The maximum size of a Telegram message is 4096 chars. 4000 is just for the safety.
 const LIST_MAX_LENGTH: isize = 4000;
+const COOLDOWN_TIME: usize = 20usize;
 
 type EntryMapping = DefaultHashMap<String, Vec<String>>;
 
@@ -66,7 +67,7 @@ impl PVMessage {
     fn to_html(&self) -> String {
         match self.method.as_str() {
             "new" => format!(
-                r#"<code> +</code> <a href="https://packages.aosc.io/packages/{}">{}</a> <code>{}</code>\n"#,
+                r#"<code> +</code> <a href="https://packages.aosc.io/packages/{}">{}</a> <code>{}</code>"#,
                 self.pkg,
                 self.pkg,
                 self.to_ver.as_ref().unwrap_or(&"?".to_string())
@@ -212,6 +213,7 @@ async fn send_all_pending_messages(
 async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool) -> Result<()> {
     let mut fail_count = 0usize;
     let mut pending = Vec::new();
+    let mut pending_time = COOLDOWN_TIME;
     loop {
         let payload = sock.recv_bytes(zmq::DONTWAIT);
         match payload {
@@ -219,21 +221,38 @@ async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqliteP
                 let msg = serde_json::from_slice::<PVMessage>(&msg);
                 if let Ok(msg) = msg {
                     pending.push(msg);
+                    pending_time = COOLDOWN_TIME; // reset the pending time
                 } else {
                     log::warn!("Invalid message received.");
                     fail_count += 1;
                     if fail_count > 10 {
                         log::error!("Too many errors encountered. Stopped monitoring ZMQ!");
+                        // Flush all the pending messages and then return
                         send_all_pending_messages(&mut pending, bot, db).await.ok();
                         return Err(anyhow!("Too many errors encountered"));
                     }
                 }
             }
             Err(e) => {
-                send_all_pending_messages(&mut pending, bot, db).await.ok();
+                if pending_time < 1 {
+                    // accumulate enough pending messages to send
+                    send_all_pending_messages(&mut pending, bot, db).await.ok();
+                    pending_time = COOLDOWN_TIME; // reset the pending time
+                    continue;
+                }
+                pending_time -= 1;
                 if e == zmq::Error::EAGAIN {
                     sleep(Duration::from_secs(1)).await;
                     continue;
+                } else {
+                    log::error!("Error occurred while receiving zmq message: {}", e);
+                    fail_count += 1;
+                    if fail_count > 10 {
+                        log::error!("Too many errors encountered. Stopped monitoring ZMQ!");
+                        // Flush all the pending messages and then return
+                        send_all_pending_messages(&mut pending, bot, db).await.ok();
+                        return Err(anyhow!("Too many errors encountered"));
+                    }
                 }
             }
         }
