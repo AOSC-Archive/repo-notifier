@@ -18,12 +18,23 @@ use zmq;
 
 const BOT_NAME: &str = "AOSC 第二包通委";
 const LIST_MAX_SIZE: usize = 30;
+// The maximum size of a Telegram message is 4096 chars. 4000 is just for the safety.
 const LIST_MAX_LENGTH: isize = 4000;
 
 type EntryMapping = DefaultHashMap<String, Vec<String>>;
 
 lazy_static! {
     static ref UPDATED: AtomicBool = AtomicBool::new(false);
+}
+
+macro_rules! send_to_subscribers {
+    ($c:expr, $bot:ident, $subs:ident) => {
+        for sub in $subs.iter() {
+            if let Err(e) = send_with_retry($c, $bot, sub.chat_id).await {
+                log::error!("{}", e);
+            }
+        }
+    };
 }
 
 #[derive(BotCommand)]
@@ -107,6 +118,7 @@ fn method_to_priority(v: &PVMessage) -> u8 {
     }
 }
 
+/// Sort the messages by priority and then truncate them to the given length
 fn sort_pending_messages_chunk(pending: &mut Vec<PVMessage>) -> EntryMapping {
     let mut mapping = DefaultHashMap::new(vec![]);
     let mut remaining = LIST_MAX_LENGTH;
@@ -176,6 +188,7 @@ async fn send_with_retry(msg: &str, bot: &AutoSend<Bot>, chat_id: i64) -> Result
     Err(anyhow!("Failed to send message to {}", chat_id))
 }
 
+/// Send all the pending messages to the subscribers
 async fn send_all_pending_messages(
     pending: &mut Vec<PVMessage>,
     bot: &AutoSend<Bot>,
@@ -189,16 +202,13 @@ async fn send_all_pending_messages(
     while !pending.is_empty() {
         let sorted = sort_pending_messages_chunk(pending);
         let formatted = format_sorted_mapping(sorted);
-        for sub in subs.iter() {
-            if let Err(e) = send_with_retry(&formatted, bot, sub.chat_id).await {
-                log::error!("{}", e);
-            }
-        }
+        send_to_subscribers!(&formatted, bot, subs);
     }
 
     Ok(())
 }
 
+/// Monitor the ZMQ endpoint of p-vector
 async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool) -> Result<()> {
     let mut fail_count = 0usize;
     let mut pending = Vec::new();
@@ -230,6 +240,7 @@ async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqliteP
     }
 }
 
+/// Monitor the `last_update` file
 async fn monitor_last_update(f: &str, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool) -> Result<()> {
     let mut inotify = Inotify::init()?;
     let mut buffer = [0; 32];
@@ -237,20 +248,18 @@ async fn monitor_last_update(f: &str, bot: &AutoSend<Bot>, db: &sqlite::SqlitePo
     let mut stream = inotify.event_stream(&mut buffer)?;
     log::info!("Last update file monitoring started.");
     while let Some(_) = stream.next().await {
+        // Only sends this notification if there are package updates
         if !UPDATED.fetch_and(false, Ordering::SeqCst) {
             continue;
         }
         let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
-        for sub in subs.iter() {
-            if let Err(e) = send_with_retry("🔄 Repository refreshed.", bot, sub.chat_id).await {
-                log::error!("{}", e);
-            }
-        }
+        send_to_subscribers!("🔄 Repository refreshed.", bot, subs);
     }
 
     Ok(())
 }
 
+/// Handle bot commands from Telegram
 async fn answer(
     cx: UpdateWithCx<AutoSend<Bot>, Message>,
     command: Command,
