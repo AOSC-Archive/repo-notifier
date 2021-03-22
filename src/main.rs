@@ -1,12 +1,14 @@
-use std::time::Duration;
+use std::{sync::atomic::Ordering, time::Duration};
 
 use anyhow::{anyhow, Result};
 use defaultmap::DefaultHashMap;
 use futures_util::StreamExt;
 use inotify::{Inotify, WatchMask};
+use lazy_static::lazy_static;
 use serde::Deserialize;
 use serde_json;
 use sqlx::{migrate, query, sqlite};
+use std::sync::atomic::AtomicBool;
 use teloxide::{
     payloads::SendMessageSetters, prelude::*, types::ParseMode, utils::command::BotCommand,
     RequestError,
@@ -19,6 +21,10 @@ const LIST_MAX_SIZE: usize = 30;
 const LIST_MAX_LENGTH: isize = 4000;
 
 type EntryMapping = DefaultHashMap<String, Vec<String>>;
+
+lazy_static! {
+    static ref UPDATED: AtomicBool = AtomicBool::new(false);
+}
 
 #[derive(BotCommand)]
 #[command(rename = "lowercase", description = "These commands are supported:")]
@@ -175,7 +181,11 @@ async fn send_all_pending_messages(
     bot: &AutoSend<Bot>,
     db: &sqlite::SqlitePool,
 ) -> Result<()> {
+    if pending.is_empty() {
+        return Ok(());
+    }
     let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
+    UPDATED.fetch_or(true, Ordering::SeqCst);
     while !pending.is_empty() {
         let sorted = sort_pending_messages_chunk(pending);
         let formatted = format_sorted_mapping(sorted);
@@ -227,6 +237,9 @@ async fn monitor_last_update(f: &str, bot: &AutoSend<Bot>, db: &sqlite::SqlitePo
     let mut stream = inotify.event_stream(&mut buffer)?;
     log::info!("Last update file monitoring started.");
     while let Some(_) = stream.next().await {
+        if !UPDATED.fetch_and(false, Ordering::SeqCst) {
+            continue;
+        }
         let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
         for sub in subs.iter() {
             if let Err(e) = send_with_retry("🔄 Repository refreshed.", bot, sub.chat_id).await {

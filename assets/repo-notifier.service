@@ -1,0 +1,12 @@
+[Unit]
+Description=Repo Notifier Bot
+After=network-online.target
+
+[Service]
+Type=simple
+User=repo
+ExecStart=/usr/local/bin/repository-notifier
+EnvironmentFile=/etc/repo-notifier.conf
+
+[Install]
+WantedBy=multi-user.target
