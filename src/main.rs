@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use defaultmap::DefaultHashMap;
+use futures_util::StreamExt;
+use inotify::{Inotify, WatchMask};
 use serde::Deserialize;
 use serde_json;
 use sqlx::{migrate, query, sqlite};
@@ -218,6 +220,24 @@ async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqliteP
     }
 }
 
+async fn monitor_last_update(f: &str, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool) -> Result<()> {
+    let mut inotify = Inotify::init()?;
+    let mut buffer = [0; 32];
+    inotify.add_watch(f, WatchMask::CREATE | WatchMask::MODIFY)?;
+    let mut stream = inotify.event_stream(&mut buffer)?;
+    log::info!("Last update file monitoring started.");
+    while let Some(_) = stream.next().await {
+        let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
+        for sub in subs.iter() {
+            if let Err(e) = send_with_retry("🔄 Repository refreshed.", bot, sub.chat_id).await {
+                log::error!("{}", e);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 async fn answer(
     cx: UpdateWithCx<AutoSend<Bot>, Message>,
     command: Command,
@@ -238,7 +258,7 @@ async fn answer(
                 .execute(&pool)
                 .await?;
             cx.reply_to("Unsubbed.").await?
-        },
+        }
         Command::Ping => cx.reply_to("Pong!").await?,
         Command::ChatID => cx.reply_to(format!("{}", cx.chat_id())).await?,
     };
@@ -247,7 +267,7 @@ async fn answer(
 }
 
 async fn run() -> Result<()> {
-    let pool = sqlite::SqlitePool::connect("sqlite:repo-notifier.db").await?;
+    let pool = sqlite::SqlitePool::connect(&std::env::var("DATABASE_URL").unwrap()).await?;
     migrate!().run(&pool).await?;
     let zmq_addr =
         std::env::var("ZMQ_ENDPOINT").expect("Please set ZMQ_ENDPOINT environment variable!");
@@ -268,7 +288,16 @@ async fn run() -> Result<()> {
                 .await,
             )
         },
-        monitor_pv(rx, &bot, &pool)
+        monitor_pv(rx, &bot, &pool),
+        async {
+            let path = std::env::var("LAST_UPDATE");
+            if let Ok(path) = path {
+                Ok(monitor_last_update(&path, &bot, &pool).await.ok())
+            } else {
+                log::warn!("Not monitoring last update file.");
+                Ok(None)
+            }
+        }
     )
     .ok();
     log::error!("Stopping bot ...");
