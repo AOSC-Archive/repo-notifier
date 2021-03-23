@@ -146,6 +146,7 @@ fn format_sorted_mapping(mapping: EntryMapping) -> String {
     for (k, v) in mapping.iter() {
         output += k;
         output += &v.join("\n");
+        output += "\n\n";
     }
 
     output
