@@ -17,7 +17,7 @@ use tokio::time::sleep;
 use zmq;
 
 const BOT_NAME: &str = "AOSC 第二包通委";
-const LIST_MAX_SIZE: usize = 30;
+const LIST_MAX_SIZE: usize = 22;
 // The maximum size of a Telegram message is 4096 chars. 4000 is just for the safety.
 const LIST_MAX_LENGTH: isize = 4000;
 const COOLDOWN_TIME: usize = 20usize;
@@ -123,9 +123,10 @@ fn method_to_priority(v: &PVMessage) -> u8 {
 fn sort_pending_messages_chunk(pending: &mut Vec<PVMessage>) -> EntryMapping {
     let mut mapping = DefaultHashMap::new(vec![]);
     let mut remaining = LIST_MAX_LENGTH;
+    let mut list_remaining = LIST_MAX_SIZE;
     mapping.reserve(LIST_MAX_SIZE);
     pending.sort_unstable_by(|a, b| method_to_priority(&a).cmp(&method_to_priority(&b)));
-    while !pending.is_empty() && remaining > 0 {
+    while !pending.is_empty() && remaining > 0 && list_remaining > 0 {
         let p = pending.pop();
         if p.is_none() {
             break;
@@ -135,6 +136,7 @@ fn sort_pending_messages_chunk(pending: &mut Vec<PVMessage>) -> EntryMapping {
         let len = html.len();
         mapping[format!("<b>{}</b> {}\n", p.comp, p.arch)].push(html);
         remaining -= len as isize;
+        list_remaining -= 1;
     }
 
     mapping
