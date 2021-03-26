@@ -16,7 +16,7 @@ use teloxide::{
 use tokio::time::sleep;
 use zmq;
 
-const BOT_NAME: &str = "AOSC 第二包通委";
+const BOT_NAME: &str = "AOSC 第三包通委";
 const LIST_MAX_SIZE: usize = 22;
 // The maximum size of a Telegram message is 4096 chars. 4000 is just for the safety.
 const LIST_MAX_LENGTH: isize = 4000;
