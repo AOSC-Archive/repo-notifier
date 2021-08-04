@@ -54,6 +54,7 @@ enum Command {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+#[serde(untagged)]
 enum PVMessageMethod {
     Old(String),
     New(u8),
@@ -80,6 +81,16 @@ struct PVMessage {
     pkg: String,
     arch: String,
     method: PVMessageMethod,
+    from_ver: Option<String>,
+    to_ver: Option<String>,
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct PVMessageNew {
+    comp: String,
+    pkg: String,
+    arch: String,
+    method: u8,
     from_ver: Option<String>,
     to_ver: Option<String>,
 }
@@ -241,8 +252,15 @@ async fn parse_message(
     new_protocol: bool,
 ) -> Result<()> {
     if new_protocol {
-        let messages: Vec<PVMessage> = bincode::deserialize(message)?;
-        pending.extend(messages);
+        let messages: Vec<PVMessageNew> = bincode::deserialize(message)?;
+        pending.extend(messages.into_iter().map(|x| PVMessage {
+            comp: x.comp,
+            pkg: x.pkg,
+            arch: x.arch,
+            method: PVMessageMethod::New(x.method),
+            from_ver: x.from_ver,
+            to_ver: x.to_ver,
+        }));
         Ok(())
     } else {
         let msg = serde_json::from_slice::<PVMessage>(&message)?;
@@ -252,7 +270,12 @@ async fn parse_message(
 }
 
 /// Monitor the ZMQ endpoint of p-vector
-async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool, new_protocol: bool) -> Result<()> {
+async fn monitor_pv(
+    sock: zmq::Socket,
+    bot: &AutoSend<Bot>,
+    db: &sqlite::SqlitePool,
+    new_protocol: bool,
+) -> Result<()> {
     let mut fail_count = 0usize;
     let mut pending = Vec::new();
     let mut pending_time = COOLDOWN_TIME;
@@ -260,16 +283,17 @@ async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqliteP
         let payload = sock.recv_bytes(zmq::DONTWAIT);
         match payload {
             Ok(msg) => {
-                if parse_message(&msg, &mut pending, new_protocol).await.is_ok() {
-                    pending_time = COOLDOWN_TIME; // reset the pending time
-                } else {
-                    log::warn!("Invalid message received.");
-                    fail_count += 1;
-                    if fail_count > 10 {
-                        log::error!("Too many errors encountered. Stopped monitoring ZMQ!");
-                        // Flush all the pending messages and then return
-                        send_all_pending_messages(&mut pending, bot, db).await.ok();
-                        return Err(anyhow!("Too many errors encountered"));
+                match parse_message(&msg, &mut pending, new_protocol).await {
+                    Ok(_) => pending_time = COOLDOWN_TIME,
+                    Err(err) => {
+                        log::warn!("Invalid message received: {}", err);
+                        fail_count += 1;
+                        if fail_count > 10 {
+                            log::error!("Too many errors encountered. Stopped monitoring ZMQ!");
+                            // Flush all the pending messages and then return
+                            send_all_pending_messages(&mut pending, bot, db).await.ok();
+                            return Err(anyhow!("Too many errors encountered"));
+                        }
                     }
                 }
             }
