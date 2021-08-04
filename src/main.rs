@@ -54,43 +54,65 @@ enum Command {
 }
 
 #[derive(Deserialize, Clone, Debug)]
+enum PVMessageMethod {
+    Old(String),
+    New(u8),
+}
+
+impl PVMessageMethod {
+    fn as_new_type(&self) -> u8 {
+        match self {
+            PVMessageMethod::New(v) => *v,
+            PVMessageMethod::Old(v) => match v.as_str() {
+                "new" => b'+',
+                "upgrade" => b'^',
+                "delete" => b'-',
+                "overwrite" => b'*',
+                _ => b'?',
+            },
+        }
+    }
+}
+
+#[derive(Deserialize, Clone, Debug)]
 struct PVMessage {
     comp: String,
     pkg: String,
     arch: String,
-    method: String,
+    method: PVMessageMethod,
     from_ver: Option<String>,
     to_ver: Option<String>,
 }
 
 impl PVMessage {
     fn to_html(&self) -> String {
-        match self.method.as_str() {
-            "new" => format!(
+        match self.method.as_new_type() {
+            b'+' => format!(
                 r#"<code> +</code> <a href="https://packages.aosc.io/packages/{}">{}</a> <code>{}</code>"#,
                 self.pkg,
                 self.pkg,
                 self.to_ver.as_ref().unwrap_or(&"?".to_string())
             ),
-            "upgrade" => format!(
+            b'^' => format!(
                 r#"<code> ^</code> <a href="https://packages.aosc.io/packages/{}">{}</a> <code>{}</code> ⇒ <code>{}</code>"#,
                 self.pkg,
                 self.pkg,
                 self.from_ver.as_ref().unwrap_or(&"?".to_string()),
                 self.to_ver.as_ref().unwrap_or(&"?".to_string())
             ),
-            "delete" => format!(
+            b'-' => format!(
                 r#"<code> -</code> <a href="https://packages.aosc.io/packages/{}">{}</a> <code>{}</code>"#,
                 self.pkg,
                 self.pkg,
                 self.from_ver.as_ref().unwrap_or(&"?".to_string())
             ),
-            "overwrite" => format!(
+            b'*' => format!(
                 r#"<code> *</code> <a href="https://packages.aosc.io/packages/{}">{}</a> <code>{}</code>"#,
                 self.pkg,
                 self.pkg,
                 self.from_ver.as_ref().unwrap_or(&"?".to_string())
             ),
+            b'i' => format!(r#"<code> i</code> {}"#, self.pkg),
             _ => format!(
                 r#"<code> ?</code> <a href="https://packages.aosc.io/packages/{}">{}</a> Unknown operation"#,
                 self.pkg, self.pkg,
@@ -110,11 +132,11 @@ fn connect_zmq(endpoint: &str) -> Result<zmq::Socket> {
 
 #[inline]
 fn method_to_priority(v: &PVMessage) -> u8 {
-    match v.method.as_ref() {
-        "delete" => 0,
-        "new" => 1,
-        "overwrite" => 2,
-        "upgrade" => 3,
+    match v.method.as_new_type() {
+        b'i' | b'-' => 0,
+        b'+' => 1,
+        b'*' => 2,
+        b'^' => 3,
         _ => 99,
     }
 }
@@ -212,8 +234,25 @@ async fn send_all_pending_messages(
     Ok(())
 }
 
+/// Parse on-the-wire messages
+async fn parse_message(
+    message: &[u8],
+    pending: &mut Vec<PVMessage>,
+    new_protocol: bool,
+) -> Result<()> {
+    if new_protocol {
+        let messages: Vec<PVMessage> = bincode::deserialize(message)?;
+        pending.extend(messages);
+        Ok(())
+    } else {
+        let msg = serde_json::from_slice::<PVMessage>(&message)?;
+        pending.push(msg);
+        Ok(())
+    }
+}
+
 /// Monitor the ZMQ endpoint of p-vector
-async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool) -> Result<()> {
+async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool, new_protocol: bool) -> Result<()> {
     let mut fail_count = 0usize;
     let mut pending = Vec::new();
     let mut pending_time = COOLDOWN_TIME;
@@ -221,9 +260,7 @@ async fn monitor_pv(sock: zmq::Socket, bot: &AutoSend<Bot>, db: &sqlite::SqliteP
         let payload = sock.recv_bytes(zmq::DONTWAIT);
         match payload {
             Ok(msg) => {
-                let msg = serde_json::from_slice::<PVMessage>(&msg);
-                if let Ok(msg) = msg {
-                    pending.push(msg);
+                if parse_message(&msg, &mut pending, new_protocol).await.is_ok() {
                     pending_time = COOLDOWN_TIME; // reset the pending time
                 } else {
                     log::warn!("Invalid message received.");
@@ -315,6 +352,7 @@ async fn run() -> Result<()> {
     migrate!().run(&pool).await?;
     let zmq_addr =
         std::env::var("ZMQ_ENDPOINT").expect("Please set ZMQ_ENDPOINT environment variable!");
+    let new_protocol = std::env::var("NEW_PROTOCOL").is_ok();
     teloxide::enable_logging!();
     log::info!("Starting bot...");
 
@@ -332,7 +370,7 @@ async fn run() -> Result<()> {
                 .await,
             )
         },
-        monitor_pv(rx, &bot, &pool),
+        monitor_pv(rx, &bot, &pool, new_protocol),
         async {
             let path = std::env::var("LAST_UPDATE");
             if let Ok(path) = path {
