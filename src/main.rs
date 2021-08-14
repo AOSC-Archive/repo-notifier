@@ -26,6 +26,7 @@ type EntryMapping = DefaultHashMap<String, Vec<String>>;
 
 lazy_static! {
     static ref UPDATED: AtomicBool = AtomicBool::new(false);
+    static ref WRITTEN: AtomicBool = AtomicBool::new(false);
 }
 
 macro_rules! send_to_subscribers {
@@ -235,7 +236,6 @@ async fn send_all_pending_messages(
         return Ok(());
     }
     let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
-    UPDATED.fetch_or(true, Ordering::SeqCst);
     while !pending.is_empty() {
         let sorted = sort_pending_messages_chunk(pending);
         let formatted = format_sorted_mapping(sorted);
@@ -283,6 +283,7 @@ async fn monitor_pv(
         let payload = sock.recv_bytes(zmq::DONTWAIT);
         match payload {
             Ok(msg) => {
+                UPDATED.fetch_or(true, Ordering::SeqCst);
                 match parse_message(&msg, &mut pending, new_protocol).await {
                     Ok(_) => pending_time = COOLDOWN_TIME,
                     Err(err) => {
@@ -306,6 +307,10 @@ async fn monitor_pv(
                 }
                 pending_time -= 1;
                 if e == zmq::Error::EAGAIN {
+                    if WRITTEN.fetch_and(false, Ordering::SeqCst) {
+                        let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
+                        send_to_subscribers!("🔄 Repository refreshed.", bot, subs);                
+                    }
                     sleep(Duration::from_secs(1)).await;
                     continue;
                 } else {
@@ -324,7 +329,7 @@ async fn monitor_pv(
 }
 
 /// Monitor the `last_update` file
-async fn monitor_last_update(f: &str, bot: &AutoSend<Bot>, db: &sqlite::SqlitePool) -> Result<()> {
+async fn monitor_last_update(f: &str, _: &AutoSend<Bot>, _: &sqlite::SqlitePool) -> Result<()> {
     let mut inotify = Inotify::init()?;
     let mut buffer = [0; 32];
     inotify.add_watch(f, WatchMask::CREATE | WatchMask::MODIFY)?;
@@ -335,8 +340,7 @@ async fn monitor_last_update(f: &str, bot: &AutoSend<Bot>, db: &sqlite::SqlitePo
         if !UPDATED.fetch_and(false, Ordering::SeqCst) {
             continue;
         }
-        let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
-        send_to_subscribers!("🔄 Repository refreshed.", bot, subs);
+        WRITTEN.fetch_or(true, Ordering::SeqCst);
     }
 
     Ok(())
