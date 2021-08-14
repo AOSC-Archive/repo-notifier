@@ -302,15 +302,16 @@ async fn monitor_pv(
                 if pending_time < 1 {
                     // accumulate enough pending messages to send
                     send_all_pending_messages(&mut pending, bot, db).await.ok();
+                    // check if "repository refreshed" needs to be sent
+                    if WRITTEN.fetch_and(false, Ordering::SeqCst) {
+                        let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
+                        send_to_subscribers!("🔄 Repository refreshed.", bot, subs);                
+                    }
                     pending_time = COOLDOWN_TIME; // reset the pending time
                     continue;
                 }
                 pending_time -= 1;
                 if e == zmq::Error::EAGAIN {
-                    if WRITTEN.fetch_and(false, Ordering::SeqCst) {
-                        let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
-                        send_to_subscribers!("🔄 Repository refreshed.", bot, subs);                
-                    }
                     sleep(Duration::from_secs(1)).await;
                     continue;
                 } else {
