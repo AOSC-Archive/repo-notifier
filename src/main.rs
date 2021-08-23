@@ -300,11 +300,16 @@ async fn monitor_pv(
             }
             Err(e) => {
                 if pending_time < 1 {
+                    // check if pending messages list is is_empty
+                    let empty = pending.is_empty();
                     // accumulate enough pending messages to send
                     send_all_pending_messages(&mut pending, bot, db).await.ok();
                     // check if "repository refreshed" needs to be sent
                     if WRITTEN.fetch_and(false, Ordering::SeqCst) {
                         let subs = query!("SELECT chat_id FROM subbed").fetch_all(db).await?;
+                        if empty && new_protocol {
+                            send_to_subscribers!("⚠️ p-vector encountered some problems. Please check the logs for more details.", bot, subs);
+                        }
                         send_to_subscribers!("🔄 Repository refreshed.", bot, subs);                
                     }
                     pending_time = COOLDOWN_TIME; // reset the pending time
