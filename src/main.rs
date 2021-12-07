@@ -6,7 +6,6 @@ use futures_util::StreamExt;
 use inotify::{Inotify, WatchMask};
 use lazy_static::lazy_static;
 use serde::Deserialize;
-use serde_json;
 use sqlx::{migrate, query, sqlite};
 use std::sync::atomic::AtomicBool;
 use teloxide::{
@@ -14,7 +13,6 @@ use teloxide::{
     RequestError,
 };
 use tokio::time::sleep;
-use zmq;
 
 const BOT_NAME: &str = "AOSC 第三包通委";
 const LIST_MAX_SIZE: usize = 22;
@@ -160,7 +158,7 @@ fn sort_pending_messages_chunk(pending: &mut Vec<PVMessage>) -> EntryMapping {
     let mut remaining = LIST_MAX_LENGTH;
     let mut list_remaining = LIST_MAX_SIZE;
     mapping.reserve(LIST_MAX_SIZE);
-    pending.sort_unstable_by(|a, b| method_to_priority(&a).cmp(&method_to_priority(&b)));
+    pending.sort_unstable_by(|a, b| method_to_priority(a).cmp(&method_to_priority(b)));
     while !pending.is_empty() && remaining > 0 && list_remaining > 0 {
         let p = pending.pop();
         if p.is_none() {
@@ -264,7 +262,7 @@ async fn parse_message(
         }));
         Ok(())
     } else {
-        let msg = serde_json::from_slice::<PVMessage>(&message)?;
+        let msg = serde_json::from_slice::<PVMessage>(message)?;
         pending.push(msg);
         Ok(())
     }
@@ -342,7 +340,7 @@ async fn monitor_last_update(f: &str, _: &AutoSend<Bot>, _: &sqlite::SqlitePool)
     inotify.add_watch(f, WatchMask::CREATE | WatchMask::MODIFY)?;
     let mut stream = inotify.event_stream(&mut buffer)?;
     log::info!("Last update file monitoring started.");
-    while let Some(_) = stream.next().await {
+    while stream.next().await.is_some() {
         // Only sends this notification if there are package updates
         if !UPDATED.fetch_and(false, Ordering::SeqCst) {
             continue;
@@ -398,11 +396,12 @@ async fn run() -> Result<()> {
     let pool_clone = pool.clone();
     tokio::try_join!(
         async {
+            teloxide::commands_repl(bot.clone(), BOT_NAME, move |cx, cmd| {
+                answer(cx, cmd, pool_clone.clone())
+            })
+            .await;
             Ok(
-                teloxide::commands_repl(bot.clone(), BOT_NAME, move |cx, cmd| {
-                    answer(cx, cmd, pool_clone.clone())
-                })
-                .await,
+                (),
             )
         },
         monitor_pv(rx, &bot, &pool, new_protocol),
