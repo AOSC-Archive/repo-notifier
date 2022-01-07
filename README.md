@@ -1,3 +1,7 @@
+# Deprecated
+
+## This project has moved to https://github.com/AOSC-Dev/repokit/tree/master/repo-notifier.
+
 Deploying
 ---------
 
